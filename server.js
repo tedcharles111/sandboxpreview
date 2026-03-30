@@ -27,7 +27,7 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 // ----------------------------------------------------------------------
-// Multi-file bundler (same as before)
+// Multi-file bundler
 function bundleMultiFile(files) {
   let htmlContent = files['index.html'] || files['index.htm'];
   if (!htmlContent) {
@@ -66,7 +66,7 @@ function bundleMultiFile(files) {
 }
 
 // ----------------------------------------------------------------------
-// Framework wrappers (adds CDNs and client‑side compilation)
+// Framework wrappers
 function wrapReact(userCode) {
   return `<!DOCTYPE html>
 <html>
@@ -80,9 +80,7 @@ function wrapReact(userCode) {
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    // User's React code:
     ${userCode}
-    // If the user defines App, render it
     if (typeof App !== 'undefined') {
       const root = ReactDOM.createRoot(document.getElementById('root'));
       root.render(React.createElement(App));
@@ -108,9 +106,7 @@ function wrapVue(userCode) {
 <body>
   <div id="app"></div>
   <script>
-    // User's Vue code:
     ${userCode}
-    // Auto-mount if not already mounted
     if (typeof app === 'undefined' && typeof Vue !== 'undefined') {
       const defaultApp = {
         template: \`<div>No Vue component defined. Please define a Vue app or component.</div>\`
@@ -162,9 +158,7 @@ function wrapAngular(userCode) {
 <body>
   <my-app></my-app>
   <script>
-    // User's Angular code:
     ${userCode}
-    // Bootstrap if not already
     if (typeof AppComponent !== 'undefined') {
       const { platformBrowserDynamic } = require('@angular/platform-browser-dynamic');
       platformBrowserDynamic().bootstrapModule(AppModule);
@@ -177,12 +171,11 @@ function wrapAngular(userCode) {
 }
 
 // ----------------------------------------------------------------------
-// API: create a new preview (supports html, files, and framework)
+// API endpoint
 app.post('/api/preview', (req, res) => {
   try {
     let { html, files, framework = 'vanilla' } = req.body;
 
-    // If files provided, bundle into a single HTML string
     if (files && typeof files === 'object') {
       let totalSize = 0;
       for (const content of Object.values(files)) {
@@ -194,18 +187,15 @@ app.post('/api/preview', (req, res) => {
       html = bundleMultiFile(files);
     }
 
-    // Now html must be a string
     if (typeof html !== 'string') {
       return res.status(400).json({ error: 'Missing "html" string or "files" object.' });
     }
 
-    // Truncate if too large
     if (Buffer.byteLength(html, 'utf8') > MAX_HTML_SIZE) {
       html = html.slice(0, MAX_HTML_SIZE);
       console.warn(`⚠️ Preview truncated to ${MAX_HTML_SIZE} bytes`);
     }
 
-    // Apply framework wrapper if needed
     let finalHtml = html;
     if (framework === 'react') {
       finalHtml = wrapReact(html);
@@ -215,7 +205,7 @@ app.post('/api/preview', (req, res) => {
       finalHtml = wrapSvelte(html);
     } else if (framework === 'angular') {
       finalHtml = wrapAngular(html);
-    } // else vanilla: no change
+    }
 
     const id = generateId();
     previews.set(id, { html: finalHtml, createdAt: Date.now() });
@@ -227,8 +217,7 @@ app.post('/api/preview', (req, res) => {
   }
 });
 
-// ----------------------------------------------------------------------
-// Serve previews (same as before)
+// Serve previews
 app.get('/preview/:id', (req, res) => {
   const { id } = req.params;
   const entry = previews.get(id);
@@ -251,8 +240,6 @@ app.get('/preview/:id', (req, res) => {
   res.send(entry.html);
 });
 
-// ----------------------------------------------------------------------
-// Health check
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -261,8 +248,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ----------------------------------------------------------------------
-// Start server
 app.listen(PORT, () => {
   console.log(`🚀 Enhanced Preview Engine running on port ${PORT}`);
   console.log(`   Supports: vanilla, react, vue, svelte, angular`);
