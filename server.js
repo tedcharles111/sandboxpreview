@@ -1,15 +1,24 @@
 const express = require('express');
 const crypto = require('crypto');
 const path = require('path');
+const cors = require('cors');
+const ts = require('typescript');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// In-memory store
 const previews = new Map();
-const PREVIEW_TTL_MS = 60 * 60 * 1000; // 1 hour
+const PREVIEW_TTL_MS = 60 * 60 * 1000;
 const MAX_HTML_SIZE = 5 * 1024 * 1024;
 const MAX_FILES_SIZE = 10 * 1024 * 1024;
+
+// Enable CORS for all origins
+app.use(cors({
+  origin: true,
+  credentials: true,
+  optionsSuccessStatus: 200
+}));
+app.options('*', cors());
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -18,7 +27,6 @@ function generateId() {
   return crypto.randomBytes(8).toString('hex');
 }
 
-// Cleanup expired previews
 setInterval(() => {
   const now = Date.now();
   for (const [id, entry] of previews.entries()) {
@@ -27,8 +35,8 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 // ----------------------------------------------------------------------
-// Multi-file bundler
-function bundleMultiFile(files) {
+// Vanilla bundler (inlines CSS/JS into HTML)
+function bundleVanillaProject(files) {
   let htmlContent = files['index.html'] || files['index.htm'];
   if (!htmlContent) {
     let fileList = Object.keys(files).map(f => `<li>${f}</li>`).join('');
@@ -66,8 +74,123 @@ function bundleMultiFile(files) {
 }
 
 // ----------------------------------------------------------------------
-// Framework wrappers
-function wrapReact(userCode) {
+// React bundler – extracts head info, uses clean body, compiles TS/TSX
+function bundleReactProject(files) {
+  let originalHtml = files['index.html'] || files['index.htm'] || '';
+
+  // Extract useful head information: title and meta tags
+  let headContent = '<meta charset="UTF-8"><title>React Preview</title>';
+  if (originalHtml) {
+    const titleMatch = originalHtml.match(/<title>(.*?)<\/title>/i);
+    if (titleMatch) headContent = `<title>${titleMatch[1]}</title>`;
+
+    const metaMatches = originalHtml.match(/<meta[^>]+>/g);
+    if (metaMatches) {
+      headContent = metaMatches.join('\n') + '\n' + headContent;
+    }
+  }
+
+  let allJsCode = '';
+  let defaultExportName = null;
+
+  for (const [filePath, content] of Object.entries(files)) {
+    if (filePath.endsWith('.js') || filePath.endsWith('.ts') || filePath.endsWith('.tsx')) {
+      let cleaned = content;
+
+      if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) {
+        const compiled = ts.transpileModule(content, {
+          compilerOptions: {
+            module: ts.ModuleKind.ESNext,
+            target: ts.ScriptTarget.ES2020,
+            jsx: ts.JsxEmit.React,
+            strict: false,
+            esModuleInterop: true,
+          },
+        });
+        cleaned = compiled.outputText;
+      }
+
+      cleaned = cleaned.replace(/^\s*import\s+.*?from\s+['"].*?['"]\s*;?\s*$/gm, '');
+
+      const defaultMatch = cleaned.match(/^\s*export\s+default\s+(\w+)\s*;?\s*$/m);
+      if (defaultMatch) {
+        defaultExportName = defaultMatch[1];
+        cleaned = cleaned.replace(/^\s*export\s+default\s+\w+\s*;?\s*$/m, '');
+      } else {
+        const inlineMatch = cleaned.match(/^\s*export\s+default\s+(function|class)\s+(\w+)\s*/);
+        if (inlineMatch) {
+          defaultExportName = inlineMatch[2];
+          cleaned = cleaned.replace(/^\s*export\s+default\s+/, '');
+        }
+      }
+
+      cleaned = cleaned.replace(/^\s*export\s+(const|let|var|function|class)\s+/, '$1 ');
+      cleaned = cleaned.replace(/^\s*export\s+/, '');
+
+      allJsCode += `/* ${filePath} */\n${cleaned}\n\n`;
+    }
+  }
+
+  if (defaultExportName) {
+    allJsCode += `\n// Ensure the default export is available as window.App\n`;
+    allJsCode += `if (typeof ${defaultExportName} !== 'undefined' && typeof window.App === 'undefined') {\n`;
+    allJsCode += `  window.App = ${defaultExportName};\n`;
+    allJsCode += `}\n`;
+  }
+
+  if (!allJsCode.includes('window.App') && !allJsCode.includes('function App(') && !allJsCode.includes('class App')) {
+    const appMatch = allJsCode.match(/(?:function|class|const)\s+(\w+)\s*(?:\(|extends|{)/);
+    if (appMatch && !allJsCode.includes(`window.App = ${appMatch[1]}`)) {
+      allJsCode += `\n// Auto-detected component: ${appMatch[1]}\n`;
+      allJsCode += `if (typeof ${appMatch[1]} !== 'undefined' && typeof window.App === 'undefined') {\n`;
+      allJsCode += `  window.App = ${appMatch[1]};\n`;
+      allJsCode += `}\n`;
+    } else {
+      allJsCode += `\nfunction App() { return <h1>No React component found. Please export a component.</h1> }\n`;
+      allJsCode += `window.App = App;\n`;
+    }
+  }
+
+  const hookSetup = `const { useState, useEffect, useRef, useCallback, useMemo, useContext, useReducer, useImperativeHandle, useLayoutEffect, useDebugValue } = React;\n`;
+
+  let finalHtml = `<!DOCTYPE html>
+<html>
+<head>
+  ${headContent}
+  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    ${hookSetup}
+    ${allJsCode}
+    if (typeof window.App !== 'undefined') {
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(React.createElement(window.App));
+    } else {
+      document.getElementById('root').innerHTML = '<p style="color:red;">⚠️ No React component found. Define a component named "App".</p>';
+    }
+  </script>
+</body>
+</html>`;
+
+  let cssInjection = '';
+  for (const [filePath, content] of Object.entries(files)) {
+    if (filePath.endsWith('.css')) {
+      cssInjection += `<style>/* ${filePath} */\n${content}\n</style>\n`;
+    }
+  }
+  if (cssInjection) {
+    finalHtml = finalHtml.replace('</head>', `${cssInjection}\n</head>`);
+  }
+  return finalHtml;
+}
+
+// ----------------------------------------------------------------------
+// Framework wrappers for single HTML strings (unchanged)
+function wrapReact(html) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -80,7 +203,7 @@ function wrapReact(userCode) {
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    ${userCode}
+    ${html}
     if (typeof App !== 'undefined') {
       const root = ReactDOM.createRoot(document.getElementById('root'));
       root.render(React.createElement(App));
@@ -95,7 +218,7 @@ function wrapReact(userCode) {
 </html>`;
 }
 
-function wrapVue(userCode) {
+function wrapVue(html) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -106,7 +229,7 @@ function wrapVue(userCode) {
 <body>
   <div id="app"></div>
   <script>
-    ${userCode}
+    ${html}
     if (typeof app === 'undefined' && typeof Vue !== 'undefined') {
       const defaultApp = {
         template: \`<div>No Vue component defined. Please define a Vue app or component.</div>\`
@@ -118,7 +241,7 @@ function wrapVue(userCode) {
 </html>`;
 }
 
-function wrapSvelte(userCode) {
+function wrapSvelte(html) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -130,7 +253,7 @@ function wrapSvelte(userCode) {
 <body>
   <div id="target"></div>
   <script>
-    const source = \`${userCode.replace(/`/g, '\\`')}\`;
+    const source = \`${html.replace(/`/g, '\\`')}\`;
     try {
       const compiled = svelte.compile(source, { generate: 'dom', format: 'iife' });
       const Component = new Function('target', compiled.js.code);
@@ -143,7 +266,7 @@ function wrapSvelte(userCode) {
 </html>`;
 }
 
-function wrapAngular(userCode) {
+function wrapAngular(html) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -158,7 +281,7 @@ function wrapAngular(userCode) {
 <body>
   <my-app></my-app>
   <script>
-    ${userCode}
+    ${html}
     if (typeof AppComponent !== 'undefined') {
       const { platformBrowserDynamic } = require('@angular/platform-browser-dynamic');
       platformBrowserDynamic().bootstrapModule(AppModule);
@@ -184,7 +307,16 @@ app.post('/api/preview', (req, res) => {
           return res.status(413).json({ error: 'Total files size exceeds 10MB limit' });
         }
       }
-      html = bundleMultiFile(files);
+
+      // If framework is React, use the React-specific bundler
+      if (framework === 'react') {
+        html = bundleReactProject(files);
+        framework = 'vanilla'; // already fully wrapped, skip later wrapper
+      } else {
+        // For other frameworks (or vanilla), use the simple bundler
+        html = bundleVanillaProject(files);
+        framework = 'vanilla';
+      }
     }
 
     if (typeof html !== 'string') {
@@ -217,7 +349,6 @@ app.post('/api/preview', (req, res) => {
   }
 });
 
-// Serve previews
 app.get('/preview/:id', (req, res) => {
   const { id } = req.params;
   const entry = previews.get(id);
@@ -241,11 +372,7 @@ app.get('/preview/:id', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    activePreviews: previews.size,
-    uptime: process.uptime(),
-  });
+  res.json({ status: 'ok', activePreviews: previews.size, uptime: process.uptime() });
 });
 
 app.listen(PORT, () => {
@@ -253,4 +380,6 @@ app.listen(PORT, () => {
   console.log(`   Supports: vanilla, react, vue, svelte, angular`);
   console.log(`   Multi‑file: send { "files": { ... } }`);
   console.log(`   Framework: send { "html": "...", "framework": "react" }`);
+  console.log(`   TypeScript (TS/TSX) supported for React multi‑file`);
+  console.log(`   CORS enabled for all origins`);
 });
