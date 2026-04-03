@@ -59,7 +59,7 @@ app.post('/api/preview', (req, res) => {
 });
 
 // ----------------------------------------------------------------------
-// Serve preview page with Sandpack embed
+// Serve preview page with Sandpack embed (fixed)
 app.get('/preview/:id', (req, res) => {
   const { id } = req.params;
   const entry = previews.get(id);
@@ -68,59 +68,71 @@ app.get('/preview/:id', (req, res) => {
   }
 
   const files = entry.files;
-  // Convert files object to a JSON string that Sandpack understands
-  // Sandpack expects a shape like { "/index.html": { code: "..." }, ... }
+  // Convert files to Sandpack format: { "/index.js": { code: "..." } }
   const sandpackFiles = {};
   for (const [filePath, content] of Object.entries(files)) {
-    // Ensure path starts with '/'
     const normalizedPath = filePath.startsWith('/') ? filePath : '/' + filePath;
     sandpackFiles[normalizedPath] = { code: content };
   }
-
   const filesJson = JSON.stringify(sandpackFiles).replace(/</g, '\\u003c');
 
-  // Determine the main file (entry point)
-  let mainFile = '/index.html';
+  // Determine entry point
+  let entryPoint = '/index.html';
   if (files['package.json']) {
-    // For npm projects, Sandpack will use the entry defined in package.json
-    // We can let Sandpack auto-detect
-    mainFile = '/index.js'; // or '/src/index.js'
+    // Sandpack will auto-detect entry from package.json, but we can hint
+    entryPoint = '/index.js';
   }
-  if (files['src/index.js']) mainFile = '/src/index.js';
-  if (files['src/index.tsx']) mainFile = '/src/index.tsx';
+  if (files['src/index.js']) entryPoint = '/src/index.js';
+  if (files['src/index.tsx']) entryPoint = '/src/index.tsx';
 
+  // Use the official Sandpack React UMD bundle and React/ReactDOM for the embed
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Sandpack Preview</title>
-  <!-- Sandpack styles and scripts -->
-  <link rel="stylesheet" href="https://sandpack.codesandbox.io/sandpack.css" />
-  <script src="https://sandpack.codesandbox.io/sandpack.js"></script>
   <style>
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
-    #sandpack-container { width: 100%; height: 100%; }
+    #root { width: 100%; height: 100%; }
   </style>
+  <!-- Load React, ReactDOM, and Sandpack -->
+  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@codesandbox/sandpack-react@2.19.10/dist/index.umd.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@codesandbox/sandpack-react@2.19.10/dist/index.css">
 </head>
 <body>
-  <div id="sandpack-container"></div>
+  <div id="root"></div>
   <script>
-    const sandpackFiles = ${filesJson};
-    const sandpack = new Sandpack('#sandpack-container', {
-      files: sandpackFiles,
-      entry: '${mainFile}',
-      showNavigator: true,
-      showConsole: true,
-      showConsoleButton: true,
-      showLineNumbers: true,
-      showInlineErrors: true,
-      showErrorOverlay: true,
-      // Automatically resolve dependencies from package.json
-      autoResolve: true,
-      // Use the official CodeSandbox bundler (self-hosted alternative available)
-      bundlerUrl: 'https://sandpack.codesandbox.io',
-    });
+    // Wait for Sandpack to be available
+    function initSandpack() {
+      if (!window.Sandpack) {
+        console.error('Sandpack not loaded yet, retrying...');
+        setTimeout(initSandpack, 500);
+        return;
+      }
+      const { Sandpack } = window.Sandpack;
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(
+        React.createElement(Sandpack, {
+          files: ${filesJson},
+          template: 'react',
+          customSetup: {
+            entry: '${entryPoint}',
+          },
+          options: {
+            showNavigator: true,
+            showConsole: true,
+            showConsoleButton: true,
+            showLineNumbers: true,
+            showInlineErrors: true,
+            showErrorOverlay: true,
+          },
+        })
+      );
+    }
+    initSandpack();
   </script>
 </body>
 </html>`;
