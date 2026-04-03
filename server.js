@@ -2,15 +2,13 @@ const express = require('express');
 const crypto = require('crypto');
 const path = require('path');
 const cors = require('cors');
-const ts = require('typescript');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 const previews = new Map();
-const PREVIEW_TTL_MS = 60 * 60 * 1000;
-const MAX_HTML_SIZE = 5 * 1024 * 1024;
-const MAX_FILES_SIZE = 10 * 1024 * 1024;
+const PREVIEW_TTL_MS = 60 * 60 * 1000; // 1 hour
+const MAX_FILES_SIZE = 10 * 1024 * 1024; // 10 MB
 
 app.use(cors({ origin: true, credentials: true, optionsSuccessStatus: 200 }));
 app.options('*', cors());
@@ -29,381 +27,120 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 // ----------------------------------------------------------------------
-// Vanilla bundler (unchanged)
-function bundleVanillaProject(files) {
-  let htmlContent = files['index.html'] || files['index.htm'];
-  if (!htmlContent) {
-    let fileList = Object.keys(files).map(f => `<li>${f}</li>`).join('');
-    htmlContent = `<!DOCTYPE html>
-<html>
-<head><title>Multi-File Preview</title></head>
-<body>
-  <h2>⚠️ No index.html found</h2>
-  <p>Available files:</p>
-  <ul>${fileList}</ul>
-</body>
-</html>`;
-  }
-
-  let cssInjection = '';
-  let jsInjection = '';
-  for (const [filePath, content] of Object.entries(files)) {
-    if (filePath.endsWith('.css')) {
-      cssInjection += `<style>/* ${filePath} */\n${content}\n</style>\n`;
-    } else if (filePath.endsWith('.js')) {
-      jsInjection += `<script>/* ${filePath} */\n${content}\n</script>\n`;
-    }
-  }
-
-  if (cssInjection || jsInjection) {
-    if (htmlContent.includes('</head>')) {
-      htmlContent = htmlContent.replace('</head>', `${cssInjection}\n${jsInjection}\n</head>`);
-    } else if (htmlContent.includes('<body')) {
-      htmlContent = htmlContent.replace('<body', `<head>${cssInjection}\n${jsInjection}</head><body`);
-    } else {
-      htmlContent = `<!DOCTYPE html><html><head>${cssInjection}\n${jsInjection}</head><body>${htmlContent}</body></html>`;
-    }
-  }
-  return htmlContent;
-}
-
-// ----------------------------------------------------------------------
-// React bundler – now with bulletproof exports stripping
-function bundleReactProject(files) {
-  let originalHtml = files['index.html'] || files['index.htm'] || '';
-
-  let headContent = '<meta charset="UTF-8"><title>React Preview</title>';
-  if (originalHtml) {
-    const titleMatch = originalHtml.match(/<title>(.*?)<\/title>/i);
-    if (titleMatch) headContent = `<title>${titleMatch[1]}</title>`;
-    const metaMatches = originalHtml.match(/<meta[^>]+>/g);
-    if (metaMatches) {
-      headContent = metaMatches.join('\n') + '\n' + headContent;
-    }
-  }
-
-  let allJsCode = '';
-  let defaultExportName = null;
-
-  for (const [filePath, content] of Object.entries(files)) {
-    if (filePath.endsWith('.js') || filePath.endsWith('.ts') || filePath.endsWith('.tsx')) {
-      let cleaned = content;
-
-      if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) {
-        // Compile TypeScript
-        const compiled = ts.transpileModule(content, {
-          compilerOptions: {
-            module: ts.ModuleKind.ESNext,
-            target: ts.ScriptTarget.ES2020,
-            jsx: ts.JsxEmit.React,
-            strict: false,
-            esModuleInterop: false,      // avoid extra helpers
-            allowSyntheticDefaultImports: false,
-          },
-        });
-        cleaned = compiled.outputText;
-
-        // 💥 Aggressively remove any line that contains 'exports' or '__esModule'
-        const lines = cleaned.split('\n');
-        const filtered = lines.filter(line => {
-          const l = line.trim();
-          if (l.startsWith('Object.defineProperty(exports,')) return false;
-          if (l.includes('exports.__esModule')) return false;
-          if (l.includes('exports.default')) return false;
-          if (l.includes('exports =')) return false;
-          if (l.match(/^\s*exports\.\w+\s*=/)) return false;
-          if (l.match(/^\s*__esModule\s*=/)) return false;
-          if (l.match(/^\s*export\s*{/)) return false;  // named exports
-          return true;
-        });
-        cleaned = filtered.join('\n');
-      }
-
-      // Remove import lines
-      cleaned = cleaned.replace(/^\s*import\s+.*?from\s+['"].*?['"]\s*;?\s*$/gm, '');
-
-      // Capture default export identifier
-      const defaultMatch = cleaned.match(/^\s*export\s+default\s+(\w+)\s*;?\s*$/m);
-      if (defaultMatch) {
-        defaultExportName = defaultMatch[1];
-        cleaned = cleaned.replace(/^\s*export\s+default\s+\w+\s*;?\s*$/m, '');
-      } else {
-        const inlineMatch = cleaned.match(/^\s*export\s+default\s+(function|class)\s+(\w+)\s*/);
-        if (inlineMatch) {
-          defaultExportName = inlineMatch[2];
-          cleaned = cleaned.replace(/^\s*export\s+default\s+/, '');
-        }
-      }
-
-      // Convert named exports to normal variables
-      cleaned = cleaned.replace(/^\s*export\s+(const|let|var|function|class)\s+/, '$1 ');
-      cleaned = cleaned.replace(/^\s*export\s+/, '');
-
-      allJsCode += `/* ${filePath} */\n${cleaned}\n\n`;
-    }
-  }
-
-  // Remove any stray 'exports' from the combined code (last resort)
-  allJsCode = allJsCode.replace(/\bexports\b/g, '');
-
-  // Make default export available as window.App
-  if (defaultExportName) {
-    allJsCode += `\n// Ensure the default export is available as window.App\n`;
-    allJsCode += `if (typeof ${defaultExportName} !== 'undefined' && typeof window.App === 'undefined') {\n`;
-    allJsCode += `  window.App = ${defaultExportName};\n`;
-    allJsCode += `}\n`;
-  }
-
-  // Auto‑detect component if still missing
-  if (!allJsCode.includes('window.App') && !allJsCode.includes('function App(') && !allJsCode.includes('class App')) {
-    const appMatch = allJsCode.match(/(?:function|class|const)\s+(\w+)\s*(?:\(|extends|{)/);
-    if (appMatch && !allJsCode.includes(`window.App = ${appMatch[1]}`)) {
-      allJsCode += `\n// Auto-detected component: ${appMatch[1]}\n`;
-      allJsCode += `if (typeof ${appMatch[1]} !== 'undefined' && typeof window.App === 'undefined') {\n`;
-      allJsCode += `  window.App = ${appMatch[1]};\n`;
-      allJsCode += `}\n`;
-    } else {
-      allJsCode += `\nfunction App() { return <h1>No React component found. Please export a component.</h1> }\n`;
-      allJsCode += `window.App = App;\n`;
-    }
-  }
-
-  // Inject React hooks into global scope
-  const hookSetup = `const { useState, useEffect, useRef, useCallback, useMemo, useContext, useReducer, useImperativeHandle, useLayoutEffect, useDebugValue } = React;\n`;
-
-  let finalHtml = `<!DOCTYPE html>
-<html>
-<head>
-  ${headContent}
-  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
-</head>
-<body>
-  <div id="root"></div>
-  <script type="text/babel">
-    // Make React hooks available
-    ${hookSetup}
-    // Combined React code (TypeScript already compiled on server):
-    ${allJsCode}
-    // Render the component
-    if (typeof window.App !== 'undefined') {
-      const root = ReactDOM.createRoot(document.getElementById('root'));
-      root.render(React.createElement(window.App));
-    } else {
-      document.getElementById('root').innerHTML = '<p style="color:red;">⚠️ No React component found. Define a component named "App".</p>';
-    }
-  </script>
-</body>
-</html>`;
-
-  // Inject any CSS from files into the head
-  let cssInjection = '';
-  for (const [filePath, content] of Object.entries(files)) {
-    if (filePath.endsWith('.css')) {
-      cssInjection += `<style>/* ${filePath} */\n${content}\n</style>\n`;
-    }
-  }
-  if (cssInjection) {
-    finalHtml = finalHtml.replace('</head>', `${cssInjection}\n</head>`);
-  }
-  return finalHtml;
-}
-
-// ----------------------------------------------------------------------
-// Framework wrappers for single HTML strings (unchanged)
-function wrapReact(html) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>React Preview</title>
-  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
-</head>
-<body>
-  <div id="root"></div>
-  <script type="text/babel">
-    ${html}
-    if (typeof App !== 'undefined') {
-      const root = ReactDOM.createRoot(document.getElementById('root'));
-      root.render(React.createElement(App));
-    } else if (typeof MyComponent !== 'undefined') {
-      const root = ReactDOM.createRoot(document.getElementById('root'));
-      root.render(React.createElement(MyComponent));
-    } else {
-      document.getElementById('root').innerHTML = '<p style="color:red;">⚠️ No React component found. Define a component named "App" or "MyComponent".</p>';
-    }
-  </script>
-</body>
-</html>`;
-}
-
-function wrapVue(html) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Vue Preview</title>
-  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-</head>
-<body>
-  <div id="app"></div>
-  <script>
-    ${html}
-    if (typeof app === 'undefined' && typeof Vue !== 'undefined') {
-      const defaultApp = {
-        template: \`<div>No Vue component defined. Please define a Vue app or component.</div>\`
-      };
-      Vue.createApp(defaultApp).mount('#app');
-    }
-  </script>
-</body>
-</html>`;
-}
-
-function wrapSvelte(html) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Svelte Preview</title>
-  <script src="https://unpkg.com/svelte@3.59.2/compiler.js"></script>
-  <script src="https://unpkg.com/svelte@3.59.2/internal.js"></script>
-</head>
-<body>
-  <div id="target"></div>
-  <script>
-    const source = \`${html.replace(/`/g, '\\`')}\`;
-    try {
-      const compiled = svelte.compile(source, { generate: 'dom', format: 'iife' });
-      const Component = new Function('target', compiled.js.code);
-      Component({ target: document.getElementById('target') });
-    } catch (err) {
-      document.getElementById('target').innerHTML = '<pre style="color:red;">Svelte compile error: ' + err.message + '</pre>';
-    }
-  </script>
-</body>
-</html>`;
-}
-
-function wrapAngular(html) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Angular Preview</title>
-  <script src="https://unpkg.com/@angular/core@16.2.0/bundles/core.umd.js"></script>
-  <script src="https://unpkg.com/@angular/common@16.2.0/bundles/common.umd.js"></script>
-  <script src="https://unpkg.com/@angular/platform-browser@16.2.0/bundles/platform-browser.umd.js"></script>
-  <script src="https://unpkg.com/@angular/elements@16.2.0/bundles/elements.umd.js"></script>
-  <script src="https://unpkg.com/@angular/compiler@16.2.0/bundles/compiler.umd.js"></script>
-</head>
-<body>
-  <my-app></my-app>
-  <script>
-    ${html}
-    if (typeof AppComponent !== 'undefined') {
-      const { platformBrowserDynamic } = require('@angular/platform-browser-dynamic');
-      platformBrowserDynamic().bootstrapModule(AppModule);
-    } else {
-      document.body.innerHTML = '<p style="color:red;">Angular component not found. Define an AppComponent.</p>';
-    }
-  </script>
-</body>
-</html>`;
-}
-
-// ----------------------------------------------------------------------
-// API endpoint
+// API endpoint: store files and return preview URL
 app.post('/api/preview', (req, res) => {
   try {
-    let { html, files, framework = 'vanilla' } = req.body;
+    let { html, files } = req.body;
 
-    if (files && typeof files === 'object') {
-      let totalSize = 0;
-      for (const content of Object.values(files)) {
-        totalSize += Buffer.byteLength(content, 'utf8');
-        if (totalSize > MAX_FILES_SIZE) {
-          return res.status(413).json({ error: 'Total files size exceeds 10MB limit' });
-        }
-      }
-      if (framework === 'react') {
-        html = bundleReactProject(files);
-        framework = 'vanilla';
-      } else {
-        html = bundleVanillaProject(files);
-        framework = 'vanilla';
-      }
+    if (typeof html === 'string') {
+      files = { 'index.html': html };
     }
 
-    if (typeof html !== 'string') {
+    if (!files || typeof files !== 'object') {
       return res.status(400).json({ error: 'Missing "html" string or "files" object.' });
     }
 
-    if (Buffer.byteLength(html, 'utf8') > MAX_HTML_SIZE) {
-      html = html.slice(0, MAX_HTML_SIZE);
-      console.warn(`⚠️ Preview truncated to ${MAX_HTML_SIZE} bytes`);
-    }
-
-    let finalHtml = html;
-    if (framework === 'react') {
-      finalHtml = wrapReact(html);
-    } else if (framework === 'vue') {
-      finalHtml = wrapVue(html);
-    } else if (framework === 'svelte') {
-      finalHtml = wrapSvelte(html);
-    } else if (framework === 'angular') {
-      finalHtml = wrapAngular(html);
+    let totalSize = 0;
+    for (const content of Object.values(files)) {
+      totalSize += Buffer.byteLength(content, 'utf8');
+      if (totalSize > MAX_FILES_SIZE) {
+        return res.status(413).json({ error: 'Total files size exceeds 10MB limit' });
+      }
     }
 
     const id = generateId();
-    previews.set(id, { html: finalHtml, createdAt: Date.now() });
+    previews.set(id, { files, createdAt: Date.now() });
     const previewUrl = `${req.protocol}://${req.get('host')}/preview/${id}`;
     res.json({ previewUrl, id });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Internal server error' });
+    const id = generateId();
+    const fallbackFiles = { 'index.html': `<!DOCTYPE html><html><body><h1>Error</h1><p>${err.message}</p></body></html>` };
+    previews.set(id, { files: fallbackFiles, createdAt: Date.now() });
+    const previewUrl = `${req.protocol}://${req.get('host')}/preview/${id}`;
+    res.json({ previewUrl, id, error: err.message });
   }
 });
 
-// Serve previews
+// ----------------------------------------------------------------------
+// Serve preview page with LiveCodes embed (with fallback)
 app.get('/preview/:id', (req, res) => {
   const { id } = req.params;
   const entry = previews.get(id);
   if (!entry) {
-    return res.status(404).send(`
-      <!DOCTYPE html>
-      <html>
-      <head><title>Preview Not Found</title></head>
-      <body style="font-family: sans-serif; text-align: center; padding: 3rem;">
-        <h2>🔍 Preview expired or does not exist</h2>
-        <p>Previews are automatically removed after 60 minutes.</p>
-        <p><a href="/">← Back to demo</a></p>
-      </body>
-      </html>
-    `);
+    return res.status(404).send(`<!DOCTYPE html><html><body><h2>Preview not found or expired</h2></body></html>`);
   }
+
+  const files = entry.files;
+  const filesJson = JSON.stringify(files);
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Preview</title>
+  <style>
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+    #container { width: 100%; height: 100%; }
+    .error-fallback { padding: 20px; font-family: monospace; white-space: pre-wrap; background: #f5f5f5; height: 100%; overflow: auto; }
+  </style>
+  <!-- Load LiveCodes from official CDN -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/livecodes@latest/dist/livecodes.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/livecodes@latest/dist/livecodes.min.js"></script>
+</head>
+<body>
+  <div id="container"></div>
+  <script>
+    (function() {
+      const files = ${filesJson};
+
+      // Wait for LiveCodes to be ready
+      if (typeof livecodes === 'undefined') {
+        console.error('LiveCodes not loaded');
+        document.getElementById('container').innerHTML = '<div class="error-fallback"><h2>⚠️ LiveCodes failed to load</h2><p>Showing raw file contents:</p><pre>' + JSON.stringify(files, null, 2) + '</pre></div>';
+        return;
+      }
+
+      // Determine main file
+      let mainFile = 'index.html';
+      if (!files['index.html'] && files['index.htm']) mainFile = 'index.htm';
+      if (!files[mainFile]) {
+        files[mainFile] = '<!DOCTYPE html><html><body><h1>Preview</h1><p>No index.html found</p></body></html>';
+      }
+
+      // Configure LiveCodes: show only the result pane (no editor) for a clean preview
+      const config = {
+        params: {
+          files: files,
+          activeFile: mainFile,
+          autoRun: true,
+          console: 'open',
+        },
+        layout: 'result',  // only the preview, no editor
+      };
+
+      // Create the playground
+      livecodes.create('#container', config).catch(err => {
+        console.error(err);
+        document.getElementById('container').innerHTML = '<div class="error-fallback"><h2>⚠️ LiveCodes initialization failed</h2><p>' + err.message + '</p><pre>' + JSON.stringify(files, null, 2) + '</pre></div>';
+      });
+    })();
+  </script>
+</body>
+</html>`;
+
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', "sandbox allow-same-origin allow-scripts allow-popups allow-forms");
-  res.send(entry.html);
+  res.send(html);
 });
 
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    activePreviews: previews.size,
-    uptime: process.uptime(),
-  });
+  res.json({ status: 'ok', activePreviews: previews.size, uptime: process.uptime() });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Enhanced Preview Engine running on port ${PORT}`);
-  console.log(`   Supports: vanilla, react, vue, svelte, angular`);
-  console.log(`   Multi‑file: send { "files": { ... } }`);
-  console.log(`   Framework: send { "html": "...", "framework": "react" }`);
-  console.log(`   TypeScript (TS/TSX) supported for React multi‑file`);
+  console.log(`🚀 LiveCodes Preview Engine running on port ${PORT}`);
+  console.log(`   Accepts: { "html": "..." } or { "files": { ... } }`);
+  console.log(`   Preview uses LiveCodes (client-side) with fallback`);
   console.log(`   CORS enabled for all origins`);
 });
