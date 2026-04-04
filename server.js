@@ -57,7 +57,7 @@ app.post('/api/preview', (req, res) => {
   }
 });
 
-// Serve preview page with esbuild-wasm + iframe (no syntax errors)
+// Serve preview page with esbuild-wasm + iframe
 app.get('/preview/:id', (req, res) => {
   const { id } = req.params;
   const entry = previews.get(id);
@@ -152,7 +152,6 @@ app.get('/preview/:id', (req, res) => {
   const iframe = document.getElementById('preview-frame');
   const errorDiv = document.getElementById('error');
 
-  // Helper: rewrite import specifiers to esm.sh CDN
   function rewriteImports(code) {
     return code.replace(/import\\s+.*?from\\s+['"]([^'"]+)['"]/g, (match, specifier) => {
       if (specifier.startsWith('.') || specifier.startsWith('/')) return match;
@@ -184,7 +183,6 @@ app.get('/preview/:id', (req, res) => {
       return;
     }
 
-    // Determine entry point
     let entryFile = '/index.js';
     if (fileMap.has('/src/index.js')) entryFile = '/src/index.js';
     if (fileMap.has('/src/index.tsx')) entryFile = '/src/index.tsx';
@@ -194,7 +192,6 @@ app.get('/preview/:id', (req, res) => {
       return;
     }
 
-    // Rewrite imports in JS/JSX files
     const rewritten = new Map();
     for (const [path, content] of fileMap.entries()) {
       if (path.endsWith('.js') || path.endsWith('.jsx') || path.endsWith('.ts') || path.endsWith('.tsx')) {
@@ -204,7 +201,6 @@ app.get('/preview/:id', (req, res) => {
       }
     }
 
-    // Virtual file system plugin for esbuild
     const fsPlugin = {
       name: 'fs',
       setup(build) {
@@ -237,7 +233,7 @@ app.get('/preview/:id', (req, res) => {
 
       const bundledCode = result.outputFiles[0].text;
 
-      // Build final iframe HTML with React CDNs (safe escaping)
+      // IMPORTANT: escape closing script tags by splitting them
       const reactCDNs = `
         <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"><` + `/script>
         <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"><` + `/script>
