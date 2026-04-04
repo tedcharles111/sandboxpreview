@@ -57,7 +57,7 @@ app.post('/api/preview', (req, res) => {
   }
 });
 
-// Serve preview page with esbuild-wasm + iframe
+// Serve preview page with loading states
 app.get('/preview/:id', (req, res) => {
   const { id } = req.params;
   const entry = previews.get(id);
@@ -73,7 +73,7 @@ app.get('/preview/:id', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Preview Sandbox</title>
+  <title>Sandbox Preview</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body, html { width: 100%; height: 100%; overflow: hidden; font-family: system-ui, -apple-system, 'Segoe UI', monospace; }
@@ -96,7 +96,7 @@ app.get('/preview/:id', (req, res) => {
       cursor: pointer;
     }
     #run-btn:hover { background: #0a7; }
-    #container { height: calc(100% - 45px); }
+    #container { height: calc(100% - 45px); position: relative; }
     iframe {
       width: 100%;
       height: 100%;
@@ -121,17 +121,35 @@ app.get('/preview/:id', (req, res) => {
       overflow: auto;
       border-left: 4px solid #ff0000;
     }
-    .loading {
+    .loading-overlay {
       position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      background: rgba(0,0,0,0.7);
-      color: white;
-      padding: 16px 24px;
-      border-radius: 12px;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #0f1117;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 16px;
+      z-index: 100;
+      transition: opacity 0.3s ease;
+    }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid rgba(99,102,241,0.3);
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .loading-text {
+      color: #8b9bb0;
       font-size: 14px;
-      z-index: 200;
     }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/esbuild-wasm@0.20.2/esbuild.wasm.js"></script>
@@ -143,6 +161,10 @@ app.get('/preview/:id', (req, res) => {
 </div>
 <div id="container">
   <iframe id="preview-frame" title="preview" sandbox="allow-same-origin allow-scripts allow-popups allow-forms allow-modals"></iframe>
+  <div id="loading-overlay" class="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text">⏳ Preparing preview...</div>
+  </div>
 </div>
 <div id="error"></div>
 
@@ -151,6 +173,11 @@ app.get('/preview/:id', (req, res) => {
   const fileMap = new Map(Object.entries(files));
   const iframe = document.getElementById('preview-frame');
   const errorDiv = document.getElementById('error');
+  const loadingOverlay = document.getElementById('loading-overlay');
+
+  function hideLoading() {
+    if (loadingOverlay) loadingOverlay.style.display = 'none';
+  }
 
   function rewriteImports(code) {
     return code.replace(/import\\s+.*?from\\s+['"]([^'"]+)['"]/g, (match, specifier) => {
@@ -164,12 +191,13 @@ app.get('/preview/:id', (req, res) => {
 
   async function bundleAndRun() {
     errorDiv.style.display = 'none';
-    iframe.srcdoc = '<div class="loading">⏳ Bundling with esbuild...</div>';
+    if (loadingOverlay) loadingOverlay.style.display = 'flex';
+    iframe.srcdoc = '';
 
     if (!window.esbuild) {
       errorDiv.textContent = '❌ esbuild failed to load. Check your internet.';
       errorDiv.style.display = 'block';
-      iframe.srcdoc = '<div class="loading">⚠️ Failed to load bundler</div>';
+      hideLoading();
       return;
     }
 
@@ -180,6 +208,7 @@ app.get('/preview/:id', (req, res) => {
     } catch (err) {
       errorDiv.textContent = '❌ esbuild init error: ' + err.message;
       errorDiv.style.display = 'block';
+      hideLoading();
       return;
     }
 
@@ -189,6 +218,7 @@ app.get('/preview/:id', (req, res) => {
     if (fileMap.has('/index.html')) {
       const htmlContent = fileMap.get('/index.html');
       iframe.srcdoc = htmlContent;
+      hideLoading();
       return;
     }
 
@@ -232,8 +262,6 @@ app.get('/preview/:id', (req, res) => {
       });
 
       const bundledCode = result.outputFiles[0].text;
-
-      // IMPORTANT: escape closing script tags by splitting them
       const reactCDNs = `
         <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"><` + `/script>
         <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"><` + `/script>
@@ -244,10 +272,11 @@ app.get('/preview/:id', (req, res) => {
         try { ${bundledCode} if (typeof SandboxModule !== "undefined" && SandboxModule.default) { const root = ReactDOM.createRoot(document.getElementById("root")); root.render(React.createElement(SandboxModule.default)); } } catch(err) { parent.postMessage({type:"error",error:err.message},"*"); }
       <\/script></body></html>`;
       iframe.srcdoc = iframeHtml;
+      hideLoading();
     } catch (err) {
       errorDiv.textContent = '❌ Build error: ' + err.message;
       errorDiv.style.display = 'block';
-      iframe.srcdoc = '<div class="loading">⚠️ Build failed</div>';
+      hideLoading();
     }
   }
 
