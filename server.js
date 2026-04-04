@@ -26,8 +26,7 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
-// ----------------------------------------------------------------------
-// API endpoint: store files and return preview URL
+// API endpoint: store files
 app.post('/api/preview', (req, res) => {
   try {
     let { html, files } = req.body;
@@ -58,8 +57,7 @@ app.post('/api/preview', (req, res) => {
   }
 });
 
-// ----------------------------------------------------------------------
-// Serve preview page with esbuild-wasm + iframe
+// Serve preview page with esbuild-wasm + iframe (no syntax errors)
 app.get('/preview/:id', (req, res) => {
   const { id } = req.params;
   const entry = previews.get(id);
@@ -191,7 +189,6 @@ app.get('/preview/:id', (req, res) => {
     if (fileMap.has('/src/index.js')) entryFile = '/src/index.js';
     if (fileMap.has('/src/index.tsx')) entryFile = '/src/index.tsx';
     if (fileMap.has('/index.html')) {
-      // Pure HTML: just serve it
       const htmlContent = fileMap.get('/index.html');
       iframe.srcdoc = htmlContent;
       return;
@@ -240,16 +237,16 @@ app.get('/preview/:id', (req, res) => {
 
       const bundledCode = result.outputFiles[0].text;
 
-      // Build final iframe HTML with React CDNs (if needed)
+      // Build final iframe HTML with React CDNs (safe escaping)
       const reactCDNs = `
-        <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"><\\/script>
-        <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"><\\/script>
-        <script src="https://cdn.jsdelivr.net/npm/react-router-dom@6.14.2/umd/react-router-dom.development.js"><\\/script>
+        <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"><` + `/script>
+        <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"><` + `/script>
+        <script src="https://cdn.jsdelivr.net/npm/react-router-dom@6.14.2/umd/react-router-dom.development.js"><` + `/script>
       `;
       const iframeHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Preview</title>${reactCDNs}</head><body><div id="root"></div><script>
         window.onerror = function(msg,url,line,col,error){ parent.postMessage({type:"error",error:msg},"*"); return true; };
         try { ${bundledCode} if (typeof SandboxModule !== "undefined" && SandboxModule.default) { const root = ReactDOM.createRoot(document.getElementById("root")); root.render(React.createElement(SandboxModule.default)); } } catch(err) { parent.postMessage({type:"error",error:err.message},"*"); }
-      <\\/script></body></html>`;
+      <\/script></body></html>`;
       iframe.srcdoc = iframeHtml;
     } catch (err) {
       errorDiv.textContent = '❌ Build error: ' + err.message;
