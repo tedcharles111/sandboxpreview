@@ -38,13 +38,13 @@ app.post('/api/preview', async (req, res) => {
     }
 
     console.log('Creating sandbox...');
-    const sandbox = await Sandbox.create({ apiKey: E2B_API_KEY, timeout: 300000 });
+    const sandbox = await Sandbox.create({ apiKey: E2B_API_KEY });
     console.log('Sandbox created, writing files...');
     for (const [filePath, content] of Object.entries(files)) {
       await sandbox.files.write(filePath, content);
     }
 
-    // Static HTML only (no package.json)
+    // If no package.json, serve index.html directly
     if (!files['package.json']) {
       const htmlContent = files['index.html'] || '<h1>No index.html</h1>';
       const id = generateId();
