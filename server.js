@@ -9,7 +9,6 @@ const PORT = process.env.PORT || 3000;
 const sandboxes = new Map();
 const PREVIEW_TTL_MS = 60 * 60 * 1000;
 
-// Get API key from environment
 const E2B_API_KEY = process.env.E2B_API_KEY;
 
 app.use(cors());
@@ -39,9 +38,7 @@ app.post('/api/preview', async (req, res) => {
       return res.status(400).json({ error: 'Missing "html" or "files"' });
     }
 
-    // Create sandbox with explicit API key
     const sandbox = await Sandbox.create({ apiKey: E2B_API_KEY });
-    
     for (const [filePath, content] of Object.entries(files)) {
       await sandbox.files.write(filePath, content);
     }
@@ -50,13 +47,28 @@ app.post('/api/preview', async (req, res) => {
     const installProc = await sandbox.process.exec('npm install');
     await installProc.wait();
 
-    // Start dev server
+    // Start dev server – use 'npm run dev' and capture stdout to detect port
     const devProc = await sandbox.process.exec('npm run dev', { background: true });
     
-    // Wait for port 5173
-    await sandbox.waitForPort(5173, { timeout: 60000 });
-    const url = sandbox.getHostname(5173);
-    
+    // Wait for any port to be ready (common ports: 3000, 5173, 8080)
+    let port = null;
+    const timeoutMs = 120000; // 2 minutes
+    const startTime = Date.now();
+    while (!port && (Date.now() - startTime) < timeoutMs) {
+      for (const p of [3000, 5173, 8080, 5000]) {
+        try {
+          await sandbox.waitForPort(p, { timeout: 2000 });
+          port = p;
+          break;
+        } catch (e) {
+          // continue
+        }
+      }
+      if (!port) await new Promise(r => setTimeout(r, 2000));
+    }
+    if (!port) throw new Error('Dev server did not start on any expected port');
+
+    const url = sandbox.getHostname(port);
     const id = generateId();
     sandboxes.set(id, { sandbox, url, createdAt: Date.now() });
     const previewUrl = `${req.protocol}://${req.get('host')}/preview/${id}`;
@@ -70,9 +82,7 @@ app.post('/api/preview', async (req, res) => {
 app.get('/preview/:id', (req, res) => {
   const { id } = req.params;
   const entry = sandboxes.get(id);
-  if (!entry) {
-    return res.status(404).send(`<!DOCTYPE html><html><body><h2>Preview not found or expired</h2></body></html>`);
-  }
+  if (!entry) return res.status(404).send('Preview expired or not found');
   const sandboxUrl = entry.url;
   const html = `<!DOCTYPE html>
 <html>
@@ -98,7 +108,6 @@ app.get('/preview/:id', (req, res) => {
       gap: 16px;
       z-index: 100;
       font-family: system-ui, sans-serif;
-      transition: opacity 0.3s ease;
     }
     .spinner {
       width: 40px;
