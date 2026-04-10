@@ -1,9 +1,9 @@
 const express = require('express');
-const { exec } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
+const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,7 +21,7 @@ setInterval(async () => {
   const now = Date.now();
   for (const [id, data] of sandboxes.entries()) {
     if (now - data.createdAt > 60 * 60 * 1000) {
-      if (data.proc) data.proc.kill();
+      if (data.server) data.server.close();
       await fs.rm(data.dir, { recursive: true, force: true });
       sandboxes.delete(id);
     }
@@ -42,68 +42,60 @@ app.post('/api/preview', async (req, res) => {
     const dir = path.join('/tmp', id);
     await fs.mkdir(dir, { recursive: true });
 
+    // Write all files – ignore package.json
     for (const [filePath, content] of Object.entries(files)) {
+      if (filePath === 'package.json') continue; // skip package.json
       const fullPath = path.join(dir, filePath);
       await fs.mkdir(path.dirname(fullPath), { recursive: true });
       await fs.writeFile(fullPath, content);
     }
 
-    if (files['package.json']) {
-      await new Promise((resolve, reject) => {
-        exec('npm install', { cwd: dir }, (error) => {
-          if (error) reject(error);
-          else resolve();
-        });
-      });
+    // If no index.html, create a fallback
+    const indexPath = path.join(dir, 'index.html');
+    try {
+      await fs.access(indexPath);
+    } catch {
+      await fs.writeFile(indexPath, '<h1>Preview</h1><p>No index.html found</p>');
     }
+
+    // Start a static HTTP server for this sandbox
+    const staticServer = http.createServer(async (req, res) => {
+      let filePath = path.join(dir, req.url === '/' ? 'index.html' : req.url);
+      try {
+        const data = await fs.readFile(filePath);
+        res.writeHead(200, { 'Content-Type': getContentType(filePath) });
+        res.end(data);
+      } catch {
+        res.writeHead(404);
+        res.end('File not found');
+      }
+    });
 
     const port = 3000 + Math.floor(Math.random() * 1000);
-    let devProcess;
-
-    if (files['vite.config.js']) {
-      devProcess = exec(`npx vite --port ${port} --host`, { cwd: dir });
-    } else if (files['package.json']) {
-      const pkg = JSON.parse(files['package.json']);
-      if (pkg.scripts && pkg.scripts.dev) {
-        devProcess = exec('npm run dev', { cwd: dir });
-      } else if (pkg.scripts && pkg.scripts.start) {
-        devProcess = exec('npm run start', { cwd: dir });
-      } else {
-        devProcess = exec('node index.js', { cwd: dir });
-      }
-    } else {
-      const http = require('http');
-      const staticServer = http.createServer(async (req, res) => {
-        const filePath = path.join(dir, req.url === '/' ? 'index.html' : req.url);
-        try {
-          const data = await fs.readFile(filePath);
-          res.writeHead(200);
-          res.end(data);
-        } catch {
-          res.writeHead(404);
-          res.end('Not found');
-        }
-      });
-      staticServer.listen(port, () => {
-        sandboxes.set(id, { dir, url: `http://localhost:${port}`, createdAt: Date.now(), proc: staticServer });
-        res.json({ previewUrl: `${req.protocol}://${req.get('host')}/preview/${id}` });
-      });
-      return;
-    }
-
-    devProcess.stdout?.on('data', (data) => console.log(data.toString()));
-    devProcess.stderr?.on('data', (data) => console.error(data.toString()));
-    await new Promise(r => setTimeout(r, 2000));
-
-    const url = `http://localhost:${port}`;
-    sandboxes.set(id, { dir, url, createdAt: Date.now(), proc: devProcess });
-    const previewUrl = `${req.protocol}://${req.get('host')}/preview/${id}`;
-    res.json({ previewUrl, id });
+    staticServer.listen(port, '0.0.0.0', () => {
+      sandboxes.set(id, { dir, server: staticServer, port, createdAt: Date.now() });
+      const previewUrl = `${req.protocol}://${req.get('host')}/preview/${id}`;
+      res.json({ previewUrl, id });
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
+
+function getContentType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const types = {
+    '.html': 'text/html',
+    '.css': 'text/css',
+    '.js': 'application/javascript',
+    '.json': 'application/json',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.svg': 'image/svg+xml',
+  };
+  return types[ext] || 'text/plain';
+}
 
 app.get('/preview/:id', (req, res) => {
   const { id } = req.params;
@@ -111,8 +103,20 @@ app.get('/preview/:id', (req, res) => {
   if (!entry) {
     return res.status(404).send('<!DOCTYPE html><html><body><h2>Preview not found or expired</h2></body></html>');
   }
-  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Preview</title><style>body,html{margin:0;padding:0;width:100%;height:100%}iframe{width:100%;height:100%;border:none}</style></head><body><iframe src="${entry.url}"></iframe></body></html>`;
-  res.send(html);
+  // Proxy requests to the internal static server
+  const proxy = http.request({
+    hostname: 'localhost',
+    port: entry.port,
+    path: req.url,
+    method: req.method,
+  }, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res);
+  });
+  req.pipe(proxy);
+  proxy.on('error', (err) => {
+    res.status(502).send('Proxy error');
+  });
 });
 
 app.get('/health', (req, res) => {
@@ -120,5 +124,5 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Docker Sandbox Orchestrator running on port ${PORT}`);
+  console.log(`🚀 Static Sandbox Preview Engine running on port ${PORT}`);
 });
