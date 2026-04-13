@@ -3,7 +3,6 @@ const crypto = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
-const mime = require('mime-types');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -64,33 +63,32 @@ app.get('/preview/:id/*', async (req, res) => {
   if (!entry) {
     return res.status(404).send('Preview not found');
   }
+  // Capture the full file path after /preview/:id/
   const filePath = path.join(entry.dir, req.params[0]);
   try {
     await fs.access(filePath);
-    const contentType = mime.lookup(filePath) || 'application/octet-stream';
-    res.setHeader('Content-Type', contentType);
-    res.sendFile(filePath);
-  } catch {
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeTypes = {
+      '.html': 'text/html',
+      '.css': 'text/css',
+      '.js': 'application/javascript',
+      '.json': 'application/json',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.svg': 'image/svg+xml',
+      '.txt': 'text/plain',
+    };
+    res.setHeader('Content-Type', mimeTypes[ext] || 'text/plain');
+    const content = await fs.readFile(filePath, 'utf8');
+    res.send(content);
+  } catch (err) {
     res.status(404).send('File not found');
   }
 });
 
-// Serve the index.html for the preview (with proper base)
-app.get('/preview/:id', async (req, res) => {
-  const { id } = req.params;
-  const entry = sandboxes.get(id);
-  if (!entry) {
-    return res.status(404).send('Preview not found');
-  }
-  // Try to serve index.html directly
-  const indexPath = path.join(entry.dir, 'index.html');
-  try {
-    await fs.access(indexPath);
-    res.sendFile(indexPath);
-  } catch {
-    // If no index.html, generate a simple one
-    res.send('<h1>Preview</h1><p>No index.html found</p>');
-  }
+// Redirect /preview/:id to /preview/:id/index.html
+app.get('/preview/:id', (req, res) => {
+  res.redirect(`/preview/${req.params.id}/index.html`);
 });
 
 app.get('/health', (req, res) => {
