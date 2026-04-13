@@ -27,7 +27,32 @@ setInterval(async () => {
   }
 }, 30 * 60 * 1000);
 
+// Map of common packages to CDN URLs
+const cdnMap = {
+  'react': 'https://esm.sh/react',
+  'react-dom': 'https://esm.sh/react-dom',
+  'framer-motion': 'https://esm.sh/framer-motion',
+  'lucide-react': 'https://esm.sh/lucide-react',
+  'zustand': 'https://esm.sh/zustand',
+  'clsx': 'https://esm.sh/clsx',
+  'tailwind-merge': 'https://esm.sh/tailwind-merge',
+};
+
+// Plugin to resolve bare imports to CDN (external)
+const cdnPlugin = {
+  name: 'cdn',
+  setup(build) {
+    build.onResolve({ filter: /^[^./]/ }, args => {
+      if (cdnMap[args.path]) {
+        return { path: cdnMap[args.path], external: true };
+      }
+      return { path: `https://esm.sh/${args.path}`, external: true };
+    });
+  },
+};
+
 async function bundleProject(dir) {
+  // Find entry point
   let entry = null;
   const candidates = ['src/main.jsx', 'src/index.jsx', 'src/main.js', 'src/index.js', 'index.js', 'main.jsx', 'src/App.jsx'];
   for (const cand of candidates) {
@@ -39,6 +64,7 @@ async function bundleProject(dir) {
   }
   if (!entry) throw new Error('No entry point found');
 
+  // Read index.html
   let html = '';
   const indexPath = path.join(dir, 'index.html');
   try {
@@ -47,6 +73,7 @@ async function bundleProject(dir) {
     html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Preview</title></head><body><div id="root"></div></body></html>';
   }
 
+  // Bundle with esbuild (external CDNs)
   const bundleResult = await esbuild.build({
     entryPoints: [path.join(dir, entry)],
     bundle: true,
@@ -54,17 +81,22 @@ async function bundleProject(dir) {
     format: 'iife',
     globalName: 'App',
     platform: 'browser',
+    plugins: [cdnPlugin],
     loader: { '.js': 'jsx', '.jsx': 'jsx', '.ts': 'tsx', '.tsx': 'tsx', '.css': 'css' },
     define: { 'process.env.NODE_ENV': '"production"' },
   });
 
   let bundledCode = '';
   let cssCode = '';
+  const externals = new Set(); // collect external packages for script injection
   for (const file of bundleResult.outputFiles) {
     if (file.path.endsWith('.js')) bundledCode = file.text;
     if (file.path.endsWith('.css')) cssCode = file.text;
+    // Extract external URLs from the bundle (they appear as comments or need parsing)
+    // Simpler: we'll just inject all known CDNs if the code references them.
   }
 
+  // Collect all CSS files from the project (including those not imported)
   const cssFiles = [];
   async function collectCSS(currentDir) {
     const items = await fs.readdir(currentDir, { withFileTypes: true });
@@ -80,6 +112,7 @@ async function bundleProject(dir) {
   await collectCSS(dir);
   const allCSS = cssCode + cssFiles.join('\n');
 
+  // Inject CSS
   if (allCSS) {
     const styleTag = `<style>${allCSS}</style>`;
     if (html.includes('</head>')) {
@@ -89,6 +122,32 @@ async function bundleProject(dir) {
     }
   }
 
+  // Inject external script tags for common packages (detected from code)
+  const usedPackages = [];
+  if (bundledCode.includes('framer-motion')) usedPackages.push('framer-motion');
+  if (bundledCode.includes('lucide-react')) usedPackages.push('lucide-react');
+  if (bundledCode.includes('zustand')) usedPackages.push('zustand');
+  if (bundledCode.includes('clsx')) usedPackages.push('clsx');
+  if (bundledCode.includes('tailwind-merge')) usedPackages.push('tailwind-merge');
+  if (bundledCode.includes('react-dom')) usedPackages.push('react-dom');
+  if (bundledCode.includes('react')) usedPackages.push('react');
+
+  let scriptTags = '';
+  for (const pkg of usedPackages) {
+    if (cdnMap[pkg]) {
+      scriptTags += `<script type="module">import "${cdnMap[pkg]}";</script>`;
+    }
+  }
+
+  if (scriptTags) {
+    if (html.includes('</head>')) {
+      html = html.replace('</head>', `${scriptTags}</head>`);
+    } else {
+      html = html.replace('<body', `<head>${scriptTags}</head><body`);
+    }
+  }
+
+  // Inject bundled code
   if (bundledCode) {
     const scriptTag = `<script>${bundledCode}</script>`;
     if (html.includes('</body>')) {
@@ -98,6 +157,7 @@ async function bundleProject(dir) {
     }
   }
 
+  // Ensure root div exists
   if (!html.includes('<div id="root"></div>') && !html.includes('<div id="root"')) {
     html = html.replace('<body>', '<body><div id="root"></div>');
   }
