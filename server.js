@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
+const mime = require('mime-types');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -56,62 +57,39 @@ app.post('/api/preview', async (req, res) => {
   }
 });
 
-// Serve static files for the sandbox (must come before the main preview route)
+// Serve static files from the sandbox directory
 app.get('/preview/:id/*', async (req, res) => {
   const { id } = req.params;
   const entry = sandboxes.get(id);
   if (!entry) {
     return res.status(404).send('Preview not found');
   }
-  // The requested file path is the rest of the URL after /preview/:id/
-  const filePath = req.params[0];
-  const fullPath = path.join(entry.dir, filePath);
+  const filePath = path.join(entry.dir, req.params[0]);
   try {
-    await fs.access(fullPath);
-    // Set correct content type based on extension
-    const ext = path.extname(fullPath).toLowerCase();
-    const mime = {
-      '.html': 'text/html',
-      '.css': 'text/css',
-      '.js': 'application/javascript',
-      '.json': 'application/json',
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.svg': 'image/svg+xml',
-    }[ext] || 'text/plain';
-    res.setHeader('Content-Type', mime);
-    res.sendFile(fullPath);
+    await fs.access(filePath);
+    const contentType = mime.lookup(filePath) || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    res.sendFile(filePath);
   } catch {
     res.status(404).send('File not found');
   }
 });
 
-// Main preview page (if no specific file, serve the index.html)
+// Serve the index.html for the preview (with proper base)
 app.get('/preview/:id', async (req, res) => {
   const { id } = req.params;
   const entry = sandboxes.get(id);
   if (!entry) {
     return res.status(404).send('Preview not found');
   }
+  // Try to serve index.html directly
   const indexPath = path.join(entry.dir, 'index.html');
   try {
     await fs.access(indexPath);
     res.sendFile(indexPath);
   } catch {
-    // Fallback: generate a simple listing
-    let fileList = '';
-    async function listFiles(dir) {
-      const items = await fs.readdir(dir, { withFileTypes: true });
-      for (const item of items) {
-        if (item.isDirectory()) {
-          await listFiles(path.join(dir, item.name));
-        } else {
-          fileList += `<li><a href="/preview/${id}/${item.name}">${item.name}</a></li>`;
-        }
-      }
-    }
-    await listFiles(entry.dir);
-    res.send(`<!DOCTYPE html><html><head><title>Preview</title></head><body><h1>Files</h1><ul>${fileList}</ul></body></html>`);
+    // If no index.html, generate a simple one
+    res.send('<h1>Preview</h1><p>No index.html found</p>');
   }
 });
 
@@ -120,5 +98,5 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Sandbox with static file serving running on port ${PORT}`);
+  console.log(`🚀 Static Sandbox Preview Engine running on port ${PORT}`);
 });
