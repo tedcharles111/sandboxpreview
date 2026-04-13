@@ -47,6 +47,14 @@ app.post('/api/preview', async (req, res) => {
       await fs.writeFile(fullPath, content);
     }
 
+    // Ensure index.html exists
+    const indexPath = path.join(dir, 'index.html');
+    try {
+      await fs.access(indexPath);
+    } catch {
+      await fs.writeFile(indexPath, '<h1>Preview</h1><p>No index.html found</p>');
+    }
+
     sandboxes.set(id, { dir, createdAt: Date.now() });
     const previewUrl = `${req.protocol}://${req.get('host')}/preview/${id}`;
     res.json({ previewUrl, id });
@@ -56,68 +64,30 @@ app.post('/api/preview', async (req, res) => {
   }
 });
 
-app.get('/preview/:id', async (req, res) => {
+// Serve static files from sandbox directory
+app.get('/preview/:id/*', async (req, res) => {
   const { id } = req.params;
   const entry = sandboxes.get(id);
   if (!entry) {
     return res.status(404).send('Preview not found');
   }
-
-  // Read all files
-  const files = {};
-  async function readDir(dir, base = '') {
-    const items = await fs.readdir(dir, { withFileTypes: true });
-    for (const item of items) {
-      const fullPath = path.join(dir, item.name);
-      const relativePath = path.join(base, item.name);
-      if (item.isDirectory()) {
-        await readDir(fullPath, relativePath);
-      } else {
-        const content = await fs.readFile(fullPath, 'utf8');
-        files[relativePath] = content;
-      }
-    }
+  const filePath = path.join(entry.dir, req.params[0]);
+  try {
+    await fs.access(filePath);
+    res.sendFile(filePath);
+  } catch {
+    res.status(404).send('File not found');
   }
-  await readDir(entry.dir);
-  const filesJson = JSON.stringify(files);
+});
 
-  // Build HTML using Playground Elements
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Preview</title>
-  <style>
-    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
-    playground-ide { width: 100%; height: 100%; }
-  </style>
-  <script type="module" src="https://unpkg.com/playground-elements@0.10.0/playground-ide.js?module"></script>
-</head>
-<body>
-  <playground-ide editable-file-system line-numbers resizable>
-    <script type="sample/html" filename="index.html">${escapeHtml(files['index.html'] || '<h1>Preview</h1>')}</script>
-    ${files['style.css'] ? `<script type="sample/css" filename="style.css">${escapeHtml(files['style.css'])}</script>` : ''}
-    ${files['app.js'] ? `<script type="sample/js" filename="app.js">${escapeHtml(files['app.js'])}</script>` : ''}
-    ${Object.entries(files).map(([file, content]) => {
-      if (file === 'index.html' || file === 'style.css' || file === 'app.js') return '';
-      const ext = path.extname(file).slice(1);
-      return `<script type="sample/${ext}" filename="${file}">${escapeHtml(content)}</script>`;
-    }).join('\n')}
-  </playground-ide>
-  <script>
-    function escapeHtml(str) {
-      return str.replace(/[&<>]/g, function(m) {
-        if (m === '&') return '&amp;';
-        if (m === '<') return '&lt;';
-        if (m === '>') return '&gt;';
-        return m;
-      });
-    }
-  </script>
-</body>
-</html>`;
-  res.send(html);
+app.get('/preview/:id', (req, res) => {
+  const { id } = req.params;
+  const entry = sandboxes.get(id);
+  if (!entry) {
+    return res.status(404).send('Preview not found');
+  }
+  // Redirect to index.html
+  res.redirect(`/preview/${id}/index.html`);
 });
 
 app.get('/health', (req, res) => {
@@ -125,5 +95,5 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Sandbox with Playground Elements running on port ${PORT}`);
+  console.log(`🚀 Static Sandbox Preview Engine running on port ${PORT}`);
 });
