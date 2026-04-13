@@ -47,14 +47,6 @@ app.post('/api/preview', async (req, res) => {
       await fs.writeFile(fullPath, content);
     }
 
-    // Ensure index.html exists
-    const indexPath = path.join(dir, 'index.html');
-    try {
-      await fs.access(indexPath);
-    } catch {
-      await fs.writeFile(indexPath, '<h1>Preview</h1><p>No index.html found</p>');
-    }
-
     sandboxes.set(id, { dir, createdAt: Date.now() });
     const previewUrl = `${req.protocol}://${req.get('host')}/preview/${id}`;
     res.json({ previewUrl, id });
@@ -64,30 +56,63 @@ app.post('/api/preview', async (req, res) => {
   }
 });
 
-// Serve static files from sandbox directory
+// Serve static files for the sandbox (must come before the main preview route)
 app.get('/preview/:id/*', async (req, res) => {
   const { id } = req.params;
   const entry = sandboxes.get(id);
   if (!entry) {
     return res.status(404).send('Preview not found');
   }
-  const filePath = path.join(entry.dir, req.params[0]);
+  // The requested file path is the rest of the URL after /preview/:id/
+  const filePath = req.params[0];
+  const fullPath = path.join(entry.dir, filePath);
   try {
-    await fs.access(filePath);
-    res.sendFile(filePath);
+    await fs.access(fullPath);
+    // Set correct content type based on extension
+    const ext = path.extname(fullPath).toLowerCase();
+    const mime = {
+      '.html': 'text/html',
+      '.css': 'text/css',
+      '.js': 'application/javascript',
+      '.json': 'application/json',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.svg': 'image/svg+xml',
+    }[ext] || 'text/plain';
+    res.setHeader('Content-Type', mime);
+    res.sendFile(fullPath);
   } catch {
     res.status(404).send('File not found');
   }
 });
 
-app.get('/preview/:id', (req, res) => {
+// Main preview page (if no specific file, serve the index.html)
+app.get('/preview/:id', async (req, res) => {
   const { id } = req.params;
   const entry = sandboxes.get(id);
   if (!entry) {
     return res.status(404).send('Preview not found');
   }
-  // Redirect to index.html
-  res.redirect(`/preview/${id}/index.html`);
+  const indexPath = path.join(entry.dir, 'index.html');
+  try {
+    await fs.access(indexPath);
+    res.sendFile(indexPath);
+  } catch {
+    // Fallback: generate a simple listing
+    let fileList = '';
+    async function listFiles(dir) {
+      const items = await fs.readdir(dir, { withFileTypes: true });
+      for (const item of items) {
+        if (item.isDirectory()) {
+          await listFiles(path.join(dir, item.name));
+        } else {
+          fileList += `<li><a href="/preview/${id}/${item.name}">${item.name}</a></li>`;
+        }
+      }
+    }
+    await listFiles(entry.dir);
+    res.send(`<!DOCTYPE html><html><head><title>Preview</title></head><body><h1>Files</h1><ul>${fileList}</ul></body></html>`);
+  }
 });
 
 app.get('/health', (req, res) => {
@@ -95,5 +120,5 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Static Sandbox Preview Engine running on port ${PORT}`);
+  console.log(`🚀 Sandbox with static file serving running on port ${PORT}`);
 });
