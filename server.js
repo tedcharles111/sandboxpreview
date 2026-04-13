@@ -3,7 +3,6 @@ const crypto = require('crypto');
 const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
-const esbuild = require('esbuild');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -27,144 +26,6 @@ setInterval(async () => {
   }
 }, 30 * 60 * 1000);
 
-// Map of common packages to CDN URLs
-const cdnMap = {
-  'react': 'https://esm.sh/react',
-  'react-dom': 'https://esm.sh/react-dom',
-  'framer-motion': 'https://esm.sh/framer-motion',
-  'lucide-react': 'https://esm.sh/lucide-react',
-  'zustand': 'https://esm.sh/zustand',
-  'clsx': 'https://esm.sh/clsx',
-  'tailwind-merge': 'https://esm.sh/tailwind-merge',
-};
-
-// Plugin to resolve bare imports to CDN (external)
-const cdnPlugin = {
-  name: 'cdn',
-  setup(build) {
-    build.onResolve({ filter: /^[^./]/ }, args => {
-      if (cdnMap[args.path]) {
-        return { path: cdnMap[args.path], external: true };
-      }
-      return { path: `https://esm.sh/${args.path}`, external: true };
-    });
-  },
-};
-
-async function bundleProject(dir) {
-  // Find entry point
-  let entry = null;
-  const candidates = ['src/main.jsx', 'src/index.jsx', 'src/main.js', 'src/index.js', 'index.js', 'main.jsx', 'src/App.jsx'];
-  for (const cand of candidates) {
-    try {
-      await fs.access(path.join(dir, cand));
-      entry = cand;
-      break;
-    } catch {}
-  }
-  if (!entry) throw new Error('No entry point found');
-
-  // Read index.html
-  let html = '';
-  const indexPath = path.join(dir, 'index.html');
-  try {
-    html = await fs.readFile(indexPath, 'utf8');
-  } catch {
-    html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Preview</title></head><body><div id="root"></div></body></html>';
-  }
-
-  // Bundle with esbuild (external CDNs)
-  const bundleResult = await esbuild.build({
-    entryPoints: [path.join(dir, entry)],
-    bundle: true,
-    write: false,
-    format: 'iife',
-    globalName: 'App',
-    platform: 'browser',
-    plugins: [cdnPlugin],
-    loader: { '.js': 'jsx', '.jsx': 'jsx', '.ts': 'tsx', '.tsx': 'tsx', '.css': 'css' },
-    define: { 'process.env.NODE_ENV': '"production"' },
-  });
-
-  let bundledCode = '';
-  let cssCode = '';
-  const externals = new Set(); // collect external packages for script injection
-  for (const file of bundleResult.outputFiles) {
-    if (file.path.endsWith('.js')) bundledCode = file.text;
-    if (file.path.endsWith('.css')) cssCode = file.text;
-    // Extract external URLs from the bundle (they appear as comments or need parsing)
-    // Simpler: we'll just inject all known CDNs if the code references them.
-  }
-
-  // Collect all CSS files from the project (including those not imported)
-  const cssFiles = [];
-  async function collectCSS(currentDir) {
-    const items = await fs.readdir(currentDir, { withFileTypes: true });
-    for (const item of items) {
-      const fullPath = path.join(currentDir, item.name);
-      if (item.isDirectory()) await collectCSS(fullPath);
-      else if (item.name.endsWith('.css') && !fullPath.includes('node_modules')) {
-        const content = await fs.readFile(fullPath, 'utf8');
-        cssFiles.push(content);
-      }
-    }
-  }
-  await collectCSS(dir);
-  const allCSS = cssCode + cssFiles.join('\n');
-
-  // Inject CSS
-  if (allCSS) {
-    const styleTag = `<style>${allCSS}</style>`;
-    if (html.includes('</head>')) {
-      html = html.replace('</head>', `${styleTag}</head>`);
-    } else {
-      html = html.replace('<body', `<head>${styleTag}</head><body`);
-    }
-  }
-
-  // Inject external script tags for common packages (detected from code)
-  const usedPackages = [];
-  if (bundledCode.includes('framer-motion')) usedPackages.push('framer-motion');
-  if (bundledCode.includes('lucide-react')) usedPackages.push('lucide-react');
-  if (bundledCode.includes('zustand')) usedPackages.push('zustand');
-  if (bundledCode.includes('clsx')) usedPackages.push('clsx');
-  if (bundledCode.includes('tailwind-merge')) usedPackages.push('tailwind-merge');
-  if (bundledCode.includes('react-dom')) usedPackages.push('react-dom');
-  if (bundledCode.includes('react')) usedPackages.push('react');
-
-  let scriptTags = '';
-  for (const pkg of usedPackages) {
-    if (cdnMap[pkg]) {
-      scriptTags += `<script type="module">import "${cdnMap[pkg]}";</script>`;
-    }
-  }
-
-  if (scriptTags) {
-    if (html.includes('</head>')) {
-      html = html.replace('</head>', `${scriptTags}</head>`);
-    } else {
-      html = html.replace('<body', `<head>${scriptTags}</head><body`);
-    }
-  }
-
-  // Inject bundled code
-  if (bundledCode) {
-    const scriptTag = `<script>${bundledCode}</script>`;
-    if (html.includes('</body>')) {
-      html = html.replace('</body>', `${scriptTag}</body>`);
-    } else {
-      html += scriptTag;
-    }
-  }
-
-  // Ensure root div exists
-  if (!html.includes('<div id="root"></div>') && !html.includes('<div id="root"')) {
-    html = html.replace('<body>', '<body><div id="root"></div>');
-  }
-
-  return html;
-}
-
 app.post('/api/preview', async (req, res) => {
   try {
     let { html, files } = req.body;
@@ -186,16 +47,7 @@ app.post('/api/preview', async (req, res) => {
       await fs.writeFile(fullPath, content);
     }
 
-    let finalHtml;
-    try {
-      finalHtml = await bundleProject(dir);
-    } catch (err) {
-      console.error('Bundling error:', err);
-      const indexPath = path.join(dir, 'index.html');
-      finalHtml = await fs.readFile(indexPath, 'utf8');
-    }
-
-    sandboxes.set(id, { dir, html: finalHtml, createdAt: Date.now() });
+    sandboxes.set(id, { dir, createdAt: Date.now() });
     const previewUrl = `${req.protocol}://${req.get('host')}/preview/${id}`;
     res.json({ previewUrl, id });
   } catch (err) {
@@ -204,29 +56,82 @@ app.post('/api/preview', async (req, res) => {
   }
 });
 
-app.get('/preview/:id/*', async (req, res) => {
+app.get('/preview/:id', async (req, res) => {
   const { id } = req.params;
   const entry = sandboxes.get(id);
   if (!entry) {
     return res.status(404).send('Preview not found');
   }
-  const filePath = path.join(entry.dir, req.params[0]);
-  try {
-    await fs.access(filePath);
-    res.sendFile(filePath);
-  } catch {
-    res.status(404).send('File not found');
-  }
-});
 
-app.get('/preview/:id', (req, res) => {
-  const { id } = req.params;
-  const entry = sandboxes.get(id);
-  if (!entry) {
-    return res.status(404).send('Preview not found');
+  // Read all files from the sandbox directory
+  const files = {};
+  async function readDir(dir, base = '') {
+    const items = await fs.readdir(dir, { withFileTypes: true });
+    for (const item of items) {
+      const fullPath = path.join(dir, item.name);
+      const relativePath = path.join(base, item.name);
+      if (item.isDirectory()) {
+        await readDir(fullPath, relativePath);
+      } else {
+        const content = await fs.readFile(fullPath, 'utf8');
+        files[relativePath] = content;
+      }
+    }
   }
-  res.setHeader('Content-Type', 'text/html');
-  res.send(entry.html);
+  await readDir(entry.dir);
+  const filesJson = JSON.stringify(files);
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Preview</title>
+  <style>
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+    #root { width: 100%; height: 100%; }
+  </style>
+  <!-- Load React, ReactDOM, and the playground -->
+  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/agneym-playground@0.1.0/dist/index.umd.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    const files = ${filesJson};
+    // Determine the main files
+    let htmlCode = files['index.html'] || '';
+    let cssCode = files['style.css'] || '';
+    let jsCode = files['app.js'] || '';
+    // Look for React entry points
+    if (files['src/main.jsx']) jsCode = files['src/main.jsx'];
+    else if (files['src/App.jsx']) jsCode = files['src/App.jsx'];
+    else if (files['src/index.js']) jsCode = files['src/index.js'];
+    // If no HTML, create a minimal one
+    if (!htmlCode) {
+      htmlCode = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Preview</title></head><body><div id="root"></div></body></html>';
+    }
+    // Initialize playground
+    const container = document.getElementById('root');
+    const Playground = window.Playground;
+    if (Playground) {
+      Playground.create(container, {
+        files: {
+          'index.html': htmlCode,
+          'style.css': cssCode,
+          'script.js': jsCode,
+        },
+        layout: 'result',
+        showConsole: true,
+      });
+    } else {
+      container.innerHTML = '<div style="padding:20px;color:red">Playground failed to load. Check your internet connection.</div>';
+    }
+  </script>
+</body>
+</html>`;
+  res.send(html);
 });
 
 app.get('/health', (req, res) => {
@@ -234,5 +139,5 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Bundling Sandbox Preview Engine running on port ${PORT}`);
+  console.log(`🚀 Sandbox with agneym/playground running on port ${PORT}`);
 });
