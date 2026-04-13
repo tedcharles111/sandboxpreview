@@ -36,11 +36,12 @@ app.post('/api/preview', async (req, res) => {
       return res.status(400).json({ error: 'Missing "html" or "files"' });
     }
 
-    // Extract HTML, CSS, JS
+    // --- Extract HTML, CSS, and JS from the uploaded files ---
     let htmlContent = files['index.html'] || '';
     let cssContent = files['style.css'] || '';
     let jsContent = files['app.js'] || '';
 
+    // Fallbacks for alternative file names
     for (const [filePath, content] of Object.entries(files)) {
       if (filePath.endsWith('.html') && !htmlContent) htmlContent = content;
       if (filePath.endsWith('.css') && !cssContent) cssContent = content;
@@ -49,9 +50,32 @@ app.post('/api/preview', async (req, res) => {
 
     if (!htmlContent) htmlContent = '<h1>Preview</h1>';
 
-    const id = generateId();
-    sandboxes.set(id, { html: htmlContent, css: cssContent, js: jsContent, createdAt: Date.now() });
+    // --- Inject CSS and JS into the HTML ---
+    let finalHtml = htmlContent;
+    if (cssContent) {
+      const styleTag = `<style>${cssContent}</style>`;
+      if (finalHtml.includes('</head>')) {
+        finalHtml = finalHtml.replace('</head>', `${styleTag}</head>`);
+      } else {
+        finalHtml = finalHtml.replace('<body', `${styleTag}<body`);
+      }
+    }
+    if (jsContent) {
+      const scriptTag = `<script>${jsContent}</script>`;
+      if (finalHtml.includes('</body>')) {
+        finalHtml = finalHtml.replace('</body>', `${scriptTag}</body>`);
+      } else {
+        finalHtml += scriptTag;
+      }
+    }
 
+    // --- Ensure a root div exists (helpful for React apps) ---
+    if (!finalHtml.includes('<div id="root"></div>')) {
+      finalHtml = finalHtml.replace('<body>', '<body><div id="root"></div>');
+    }
+
+    const id = generateId();
+    sandboxes.set(id, { html: finalHtml, createdAt: Date.now() });
     const previewUrl = `${req.protocol}://${req.get('host')}/preview/${id}`;
     res.json({ previewUrl, id });
   } catch (err) {
@@ -66,73 +90,14 @@ app.get('/preview/:id', (req, res) => {
   if (!entry) {
     return res.status(404).send('Preview not found');
   }
-
-  // Build a CodePen embedded preview using the iframe API
-  // CodePen's embed endpoint expects a JSON object in the src parameter.
-  // Actually, the easiest way is to create a data URL for CodePen's "prefill" POST, but that opens a new window.
-  // Instead, we'll embed using an iframe with srcdoc that contains a simple sandbox? No, better to use a static HTML that loads the code in a sandboxed iframe.
-
-  // We'll create a simple inline preview (like the static server) because CodePen embed requires a paid plan for private pens.
-  // Let's fall back to a static preview with an iframe that contains the HTML, CSS, JS.
-
-  const htmlContent = entry.html;
-  const cssContent = entry.css;
-  const jsContent = entry.js;
-
-  // Build a complete HTML document with inline CSS and JS
-  const fullHtml = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Preview</title>
-  <style>${cssContent}</style>
-</head>
-<body>
-  ${htmlContent}
-  <script>${jsContent}<\/script>
-</body>
-</html>`;
-
-  // Serve as srcdoc in an iframe for isolation
-  const previewHtml = `<!DOCTYPE html>
-<html>
-<head>
-  <style>
-    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
-    iframe { width: 100%; height: 100%; border: none; }
-  </style>
-</head>
-<body>
-  <iframe sandbox="allow-same-origin allow-scripts allow-popups allow-forms" srcdoc="${escapeHtml(fullHtml)}"></iframe>
-  <script>
-    function escapeHtml(str) {
-      return str.replace(/[&<>]/g, function(m) {
-        if (m === '&') return '&amp;';
-        if (m === '<') return '&lt;';
-        if (m === '>') return '&gt;';
-        return m;
-      });
-    }
-  </script>
-</body>
-</html>`;
-  res.send(previewHtml);
+  res.setHeader('Content-Type', 'text/html');
+  res.send(entry.html);
 });
-
-function escapeHtml(str) {
-  return str.replace(/[&<>]/g, function(m) {
-    if (m === '&') return '&amp;';
-    if (m === '<') return '&lt;';
-    if (m === '>') return '&gt;';
-    return m;
-  });
-}
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', activePreviews: sandboxes.size });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Static Preview Engine (inline iframe) running on port ${PORT}`);
+  console.log(`🚀 Sandbox Preview Engine running on port ${PORT}`);
 });
