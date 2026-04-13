@@ -63,7 +63,7 @@ app.get('/preview/:id', async (req, res) => {
     return res.status(404).send('Preview not found');
   }
 
-  // Read all files from the sandbox directory
+  // Read all files
   const files = {};
   async function readDir(dir, base = '') {
     const items = await fs.readdir(dir, { withFileTypes: true });
@@ -81,6 +81,7 @@ app.get('/preview/:id', async (req, res) => {
   await readDir(entry.dir);
   const filesJson = JSON.stringify(files);
 
+  // Build HTML using Playground Elements
   const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -89,44 +90,29 @@ app.get('/preview/:id', async (req, res) => {
   <title>Preview</title>
   <style>
     body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
-    #root { width: 100%; height: 100%; }
+    playground-ide { width: 100%; height: 100%; }
   </style>
-  <!-- Load React, ReactDOM, and the playground -->
-  <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
-  <script src="https://unpkg.com/agneym-playground@0.1.0/dist/index.umd.js"></script>
+  <script type="module" src="https://unpkg.com/playground-elements@0.10.0/playground-ide.js?module"></script>
 </head>
 <body>
-  <div id="root"></div>
+  <playground-ide editable-file-system line-numbers resizable>
+    <script type="sample/html" filename="index.html">${escapeHtml(files['index.html'] || '<h1>Preview</h1>')}</script>
+    ${files['style.css'] ? `<script type="sample/css" filename="style.css">${escapeHtml(files['style.css'])}</script>` : ''}
+    ${files['app.js'] ? `<script type="sample/js" filename="app.js">${escapeHtml(files['app.js'])}</script>` : ''}
+    ${Object.entries(files).map(([file, content]) => {
+      if (file === 'index.html' || file === 'style.css' || file === 'app.js') return '';
+      const ext = path.extname(file).slice(1);
+      return `<script type="sample/${ext}" filename="${file}">${escapeHtml(content)}</script>`;
+    }).join('\n')}
+  </playground-ide>
   <script>
-    const files = ${filesJson};
-    // Determine the main files
-    let htmlCode = files['index.html'] || '';
-    let cssCode = files['style.css'] || '';
-    let jsCode = files['app.js'] || '';
-    // Look for React entry points
-    if (files['src/main.jsx']) jsCode = files['src/main.jsx'];
-    else if (files['src/App.jsx']) jsCode = files['src/App.jsx'];
-    else if (files['src/index.js']) jsCode = files['src/index.js'];
-    // If no HTML, create a minimal one
-    if (!htmlCode) {
-      htmlCode = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Preview</title></head><body><div id="root"></div></body></html>';
-    }
-    // Initialize playground
-    const container = document.getElementById('root');
-    const Playground = window.Playground;
-    if (Playground) {
-      Playground.create(container, {
-        files: {
-          'index.html': htmlCode,
-          'style.css': cssCode,
-          'script.js': jsCode,
-        },
-        layout: 'result',
-        showConsole: true,
+    function escapeHtml(str) {
+      return str.replace(/[&<>]/g, function(m) {
+        if (m === '&') return '&amp;';
+        if (m === '<') return '&lt;';
+        if (m === '>') return '&gt;';
+        return m;
       });
-    } else {
-      container.innerHTML = '<div style="padding:20px;color:red">Playground failed to load. Check your internet connection.</div>';
     }
   </script>
 </body>
@@ -139,5 +125,5 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Sandbox with agneym/playground running on port ${PORT}`);
+  console.log(`🚀 Sandbox with Playground Elements running on port ${PORT}`);
 });
